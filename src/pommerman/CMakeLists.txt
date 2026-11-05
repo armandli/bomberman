@@ -11,6 +11,11 @@ target_include_directories(train_dqn SYSTEM PRIVATE ${TORCH_INCLUDE_DIRS})
 target_link_libraries(train_dqn PRIVATE pommerman_rl_lib ${TORCH_LIBRARIES} CLI11::CLI11)
 target_compile_options(train_dqn PRIVATE ${TORCH_CXX_FLAGS} -Wall -Wextra)
 
+add_executable(train_muzero train_muzero.cpp)
+target_include_directories(train_muzero SYSTEM PRIVATE ${TORCH_INCLUDE_DIRS})
+target_link_libraries(train_muzero PRIVATE pommerman_muzero_lib ${TORCH_LIBRARIES} CLI11::CLI11)
+target_compile_options(train_muzero PRIVATE ${TORCH_CXX_FLAGS} -Wall -Wextra)
+
 # ── Core library (no UI dependencies) ────────────────────────────────────────
 add_library(pommerman_lib
     characters.cpp

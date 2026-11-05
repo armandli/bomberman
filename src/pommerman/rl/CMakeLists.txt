@@ -20,3 +20,5 @@ target_compile_options(pommerman_rl_lib PRIVATE
     ${TORCH_CXX_FLAGS}
     -Wall -Wextra
 )
+
+add_subdirectory(muzero)
