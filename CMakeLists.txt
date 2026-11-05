@@ -16,7 +16,19 @@ endif()
 set(CMAKE_CXX_FLAGS_DEBUG   "-g -O0 -fsanitize=address,undefined")
 set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG")
 
+# libtorch
+set(TORCH_PATH "/home/armandli/alphago_zero/libtorch"
+    CACHE PATH "Path to libtorch installation")
+find_package(Torch REQUIRED PATHS ${TORCH_PATH} NO_DEFAULT_PATH)
+
 include(FetchContent)
+
+# CLI11 for training app argument parsing
+FetchContent_Declare(CLI11
+  GIT_REPOSITORY https://github.com/CLIUtils/CLI11.git
+  GIT_TAG        v2.4.1
+)
+FetchContent_MakeAvailable(CLI11)
 
 # FTXUI
 FetchContent_Declare(ftxui

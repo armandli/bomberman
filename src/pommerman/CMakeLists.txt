@@ -1,3 +1,16 @@
+add_subdirectory(rl)
+
+# ── Training apps ─────────────────────────────────────────────────────────────
+add_executable(train_ppo train_ppo.cpp)
+target_include_directories(train_ppo SYSTEM PRIVATE ${TORCH_INCLUDE_DIRS})
+target_link_libraries(train_ppo PRIVATE pommerman_rl_lib ${TORCH_LIBRARIES} CLI11::CLI11)
+target_compile_options(train_ppo PRIVATE ${TORCH_CXX_FLAGS} -Wall -Wextra)
+
+add_executable(train_dqn train_dqn.cpp)
+target_include_directories(train_dqn SYSTEM PRIVATE ${TORCH_INCLUDE_DIRS})
+target_link_libraries(train_dqn PRIVATE pommerman_rl_lib ${TORCH_LIBRARIES} CLI11::CLI11)
+target_compile_options(train_dqn PRIVATE ${TORCH_CXX_FLAGS} -Wall -Wextra)
+
 # ── Core library (no UI dependencies) ────────────────────────────────────────
 add_library(pommerman_lib
     characters.cpp
