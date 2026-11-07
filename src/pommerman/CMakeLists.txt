@@ -23,6 +23,7 @@ add_library(pommerman_lib
     forward_model.cpp
     environment.cpp
     agents/random_agent.cpp
+    agents/simple_agent.cpp
 )
 target_include_directories(pommerman_lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/..)
 target_compile_options(pommerman_lib PRIVATE -Wall -Wextra -Wpedantic)

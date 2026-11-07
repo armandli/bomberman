@@ -31,12 +31,15 @@ public:
         float entropy;
         float mean_reward;
         float explained_variance;
+        int   episodes;      // games finished during this rollout
+        float mean_ep_len;   // mean length of those games (0 if none)
     };
 
     // Collect one rollout and run PPO updates. Returns training statistics.
     Stats update(Environment& env);
 
     PPOActorCritic& model() { return model_; }
+    torch::optim::Optimizer& optimizer() { return *optimizer_; }
 
 private:
     // One time-step of data for all NUM_AGENTS agents simultaneously
@@ -48,15 +51,15 @@ private:
         torch::Tensor log_probs;  // [4]
         torch::Tensor values;     // [4]
         torch::Tensor rewards;    // [4]
-        torch::Tensor dones;      // [4]  broadcast scalar
+        torch::Tensor dones;      // [4]  per-agent terminal: died this step or game over
+        torch::Tensor valid;      // [4]  1 if the agent was alive (acted) this step
     };
 
     std::vector<Step> collect_rollout(Environment& env);
 
     std::pair<torch::Tensor, torch::Tensor> compute_gae(
         const std::vector<Step>& steps,
-        const torch::Tensor& last_values,  // [4]
-        bool last_done
+        const torch::Tensor& last_values   // [4] V(s_T) for bootstrapping
     );
 
     PPOActorCritic                        model_;
@@ -66,6 +69,9 @@ private:
 
     std::vector<Observation> curr_obs_;
     bool                     curr_done_ = true;
+    int                      ep_len_    = 0;     // steps in the current game
+    int                      rollout_eps_     = 0;
+    int                      rollout_ep_len_  = 0;
 };
 
 } // namespace pommerman::rl

@@ -50,18 +50,20 @@ DQNTrainer::Stats DQNTrainer::step(Environment& env) {
 
     std::array<Action, NUM_AGENTS> acts{};
 
-    if (torch::rand({1}).item<float>() < eps) {
-        for (int i = 0; i < NUM_AGENTS; ++i)
-            acts[i] = static_cast<Action>(
-                torch::randint(0, NUM_ACTIONS, {1}).item<int64_t>());
-    } else {
+    // Independent epsilon-greedy decision per agent
+    {
         torch::NoGradGuard ng;
         online_net_->eval();
         auto q = online_net_->forward(
             item_cpu.to(device_), sp_cpu.to(device_), ag_cpu.to(device_));
-        auto chosen = q.argmax(-1); // [4]
-        for (int i = 0; i < NUM_AGENTS; ++i)
-            acts[i] = static_cast<Action>(chosen[i].item<int64_t>());
+        auto chosen = q.argmax(-1).cpu(); // [4]
+        for (int i = 0; i < NUM_AGENTS; ++i) {
+            if (torch::rand({1}).item<float>() < eps)
+                acts[i] = static_cast<Action>(
+                    torch::randint(0, NUM_ACTIONS, {1}).item<int64_t>());
+            else
+                acts[i] = static_cast<Action>(chosen[i].item<int64_t>());
+        }
     }
 
     auto [new_obs, base_rew, done, info] = env.step(acts);
@@ -71,34 +73,39 @@ DQNTrainer::Stats DQNTrainer::step(Environment& env) {
     // Encode next observations (CPU)
     auto [next_item, next_sp, next_ag] = obs_to_tensors(new_obs);
 
-    // Store one transition per alive agent
+    // Store one transition per agent that was alive; death is terminal for
+    // that agent, so its target must not bootstrap from the post-death state.
     for (int i = 0; i < NUM_AGENTS; ++i) {
-        bool was_alive = std::find(curr_obs_[i].alive_agents.begin(),
-                                   curr_obs_[i].alive_agents.end(), i)
-                         != curr_obs_[i].alive_agents.end();
-        if (!was_alive) continue;
+        if (!RewardShaper::agent_was_alive(curr_obs_, i)) continue;
 
         buffer_.add(
             item_cpu[i], sp_cpu[i], ag_cpu[i],
             static_cast<int>(acts[i]),
             shaped[i],
             next_item[i], next_sp[i], next_ag[i],
-            done);
+            RewardShaper::agent_terminal(new_obs, i, done));
     }
 
     curr_obs_  = std::move(new_obs);
     curr_done_ = done;
+    ++ep_len_;
     if (done) {
-        curr_obs_  = env.reset();
-        curr_done_ = false;
+        ++episodes_;
+        last_ep_len_    = ep_len_;
+        ep_len_         = 0;
+        curr_obs_       = env.reset();
+        curr_done_      = false;
+        last_ep_reward_ = ep_reward_;
+        ep_reward_      = 0.0f;
     }
 
     ++global_step_;
 
-    // Not enough data yet
-    if (buffer_.size() < cfg_.warmup_steps)
+    // Not enough data yet, or not an update step
+    if (buffer_.size() < cfg_.warmup_steps ||
+        global_step_ % std::max(1, cfg_.train_freq) != 0)
         return {std::numeric_limits<float>::quiet_NaN(),
-                ep_reward_, eps, buffer_.size()};
+                last_ep_reward_, eps, buffer_.size(), episodes_, last_ep_len_};
 
     // --- Gradient update ---
     online_net_->train();
@@ -131,11 +138,14 @@ DQNTrainer::Stats DQNTrainer::step(Environment& env) {
     torch::nn::utils::clip_grad_norm_(online_net_->parameters(), cfg_.max_grad_norm);
     optimizer_->step();
 
-    // Periodically hard-copy online → target
-    if (global_step_ % cfg_.target_update_freq == 0)
+    // Periodically hard-copy online → target (counted in env steps; this runs
+    // only on update steps, so check the window rather than exact equality)
+    if (global_step_ / cfg_.target_update_freq !=
+        (global_step_ - std::max(1, cfg_.train_freq)) / cfg_.target_update_freq)
         sync_target();
 
-    return {loss.item<float>(), ep_reward_, eps, buffer_.size()};
+    return {loss.item<float>(), last_ep_reward_, eps, buffer_.size(),
+            episodes_, last_ep_len_};
 }
 
 } // namespace pommerman::rl

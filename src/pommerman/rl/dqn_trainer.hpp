@@ -14,6 +14,7 @@ struct DQNConfig {
     int    batch_size         = 64;
     int    warmup_steps       = 10'000;
     int    target_update_freq = 1'000;
+    int    train_freq         = 4;       // gradient step every N env steps
     float  eps_start          = 1.0f;
     float  eps_end            = 0.1f;
     int    eps_decay_steps    = 1'000'000;
@@ -29,15 +30,23 @@ public:
 
     struct Stats {
         float loss;         // NaN while warming up
-        float ep_reward;    // cumulative episode reward for agent 0
+        float ep_reward;    // agent 0's total reward in the last completed episode
         float epsilon;
         int   buffer_size;
+        int   episodes;     // games finished so far
+        int   last_ep_len;  // length of the last finished game
     };
 
-    // Execute one environment step (and optionally one gradient update).
+    // Execute one environment step (and a gradient update every train_freq steps).
+    // Stats::loss is NaN when no update ran this step.
     Stats step(Environment& env);
 
     int global_step() const { return global_step_; }
+    // Resume support: continue the epsilon schedule / target-sync cadence.
+    void set_global_step(int s) { global_step_ = s; }
+    torch::optim::Optimizer& optimizer() { return *optimizer_; }
+    // Re-copy online → target (after loading a checkpoint into online_net).
+    void sync_target_net() { sync_target(); }
 
     DuelingDQN& online_net() { return online_net_; }
     DuelingDQN& target_net() { return target_net_; }
@@ -54,7 +63,11 @@ private:
     ReplayBuffer                         buffer_;
 
     int   global_step_ = 0;
-    float ep_reward_   = 0.0f;
+    float ep_reward_      = 0.0f;   // running total for the current episode
+    float last_ep_reward_ = 0.0f;   // total of the last completed episode
+    int   ep_len_         = 0;
+    int   last_ep_len_    = 0;
+    int   episodes_       = 0;
 
     std::vector<Observation> curr_obs_;
     bool                     curr_done_ = true;

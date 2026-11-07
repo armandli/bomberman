@@ -6,6 +6,7 @@ add_library(pommerman_rl_lib
     replay_buffer.cpp
     ppo_trainer.cpp
     dqn_trainer.cpp
+    evaluator.cpp
 )
 # Public include: src/ so consumers use #include "pommerman/rl/..."
 target_include_directories(pommerman_rl_lib

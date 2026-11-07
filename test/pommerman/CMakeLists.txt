@@ -3,6 +3,7 @@ add_executable(test_pommerman
     test_utility.cpp
     test_forward_model.cpp
     test_environment.cpp
+    test_simple_agent.cpp
 )
 target_link_libraries(test_pommerman
     PRIVATE pommerman_lib

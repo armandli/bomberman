@@ -10,22 +10,18 @@ namespace pommerman::rl::muzero {
 
 void GameSegment::compute_value_targets(float discount, int td_steps) {
     int T = static_cast<int>(rewards.size());
-    value_targets.resize(T, 0.f);
+    value_targets.assign(T, 0.f);
 
     for (int t = 0; t < T; ++t) {
-        // n-step discounted return
         float G = 0.f;
         float gamma_k = 1.f;
         for (int k = 0; k < td_steps && t + k < T; ++k) {
             G += gamma_k * rewards[t + k];
             gamma_k *= discount;
         }
-        // Bootstrap from MCTS value at t+td_steps (use mcts value_targets computed
-        // from the visit-count weighted value: mean Q of root node)
-        // We store the root value alongside mcts_policies in value_targets during
-        // self-play.  Here we just use the already-stored bootstrap value if available.
-        // The bootstrap is added by the trainer when it pushes segments; at this call
-        // the terminal tail has zero bootstrap by convention.
+        int boot = t + td_steps;
+        if (boot < T && boot < static_cast<int>(root_values.size()))
+            G += gamma_k * root_values[boot];
         value_targets[t] = G;
     }
 }
@@ -75,6 +71,11 @@ TrainingBatch GameBuffer::sample_batch(torch::Device device) const {
     auto rewards_t      = torch::zeros({B, K},             torch::kFloat);
     auto mcts_pol_t     = torch::zeros({B, K, NUM_ACTIONS},torch::kFloat);
     auto value_tgt_t    = torch::zeros({B, K},             torch::kFloat);
+    auto next_item_t    = torch::zeros({B, K, 121},        torch::kLong);
+    auto next_sp_t      = torch::zeros({B, K, 121, 8},     torch::kFloat);
+    auto next_ag_t      = torch::zeros({B, K, 13},         torch::kFloat);
+    auto next_mask_t    = torch::zeros({B, K},             torch::kFloat);
+    std::uniform_int_distribution<int> rand_action(0, NUM_ACTIONS - 1);
 
     for (int i = 0; i < B; ++i) {
         auto [g, t] = chosen[i];
@@ -86,11 +87,23 @@ TrainingBatch GameBuffer::sample_batch(torch::Device device) const {
         ag_feat_t[i]   = seg.ag_feats[t];
 
         for (int k = 0; k < K; ++k) {
-            int idx = std::min(t + k, T - 1);
-            actions_t[i][k]      = seg.actions[idx];
-            rewards_t[i][k]      = seg.rewards[idx];
-            mcts_pol_t[i][k]     = seg.mcts_policies[idx];
-            value_tgt_t[i][k]    = seg.value_targets[idx];
+            int idx = t + k;
+            if (idx < T) {
+                actions_t[i][k]   = seg.actions[idx];
+                rewards_t[i][k]   = seg.rewards[idx];
+                mcts_pol_t[i][k]  = seg.mcts_policies[idx];
+                value_tgt_t[i][k] = seg.value_targets[idx];
+            } else {
+                // Past the terminal step: absorbing state with zero reward/value,
+                // no policy target, arbitrary action.
+                actions_t[i][k] = rand_action(rng);
+            }
+            if (idx + 1 < T) {
+                next_item_t[i][k] = seg.item_idxs[idx + 1];
+                next_sp_t[i][k]   = seg.sp_conts[idx + 1];
+                next_ag_t[i][k]   = seg.ag_feats[idx + 1];
+                next_mask_t[i][k] = 1.f;
+            }
         }
     }
 
@@ -101,7 +114,11 @@ TrainingBatch GameBuffer::sample_batch(torch::Device device) const {
         actions_t.to(device),
         rewards_t.to(device),
         mcts_pol_t.to(device),
-        value_tgt_t.to(device)
+        value_tgt_t.to(device),
+        next_item_t.to(device),
+        next_sp_t.to(device),
+        next_ag_t.to(device),
+        next_mask_t.to(device)
     };
 }
 

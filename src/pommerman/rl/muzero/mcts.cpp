@@ -32,27 +32,28 @@ float MCTSNode::value() const {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-static void expand_node(MCTSNode& node, MuZeroModel& model) {
-    // prediction: policy_logits [1,6], value [1]
-    auto [logits, value_t] = model->predict(node.hidden);
-    auto priors = torch::softmax(logits, /*dim=*/1); // [1,6]
+// Expands `node`: computes its priors/value with the prediction network and
+// creates all children with one batched dynamics call. Returns the predicted
+// value; visit statistics are updated only by backup().
+static float expand_node(MCTSNode& node, MuZeroModel& model) {
+    auto [logits, value_t] = model->predict(node.hidden);   // [1,6], [1]
+    auto priors = torch::softmax(logits, /*dim=*/1)[0].cpu(); // [6]
     float v = value_t.item<float>();
 
-    // Store value_sum so it contributes on first backup
-    node.value_sum = v;
-    node.visit_count = 1;
-    node.expanded = true;
+    auto actions = torch::arange(NUM_ACTIONS,
+        torch::TensorOptions().dtype(torch::kLong).device(node.hidden.device()));
+    auto hiddens = node.hidden.expand({NUM_ACTIONS, node.hidden.size(1)});
+    auto [next_h, rewards_t] = model->step(hiddens, actions); // [6,D], [6]
+    auto rewards = rewards_t.cpu();
 
+    auto p_acc = priors.accessor<float, 1>();
+    auto r_acc = rewards.accessor<float, 1>();
     for (int a = 0; a < NUM_ACTIONS; ++a) {
-        float p = priors[0][a].item<float>();
-        // next_hidden, reward from dynamics
-        auto action_t = torch::tensor(a, torch::TensorOptions().dtype(torch::kLong))
-                            .unsqueeze(0)
-                            .to(node.hidden.device());  // [1]
-        auto [next_h, reward_t] = model->step(node.hidden, action_t);
-        float r = reward_t.item<float>();
-        node.children[a] = std::make_unique<MCTSNode>(next_h, p, r);
+        node.children[a] = std::make_unique<MCTSNode>(
+            next_h.slice(0, a, a + 1), p_acc[a], r_acc[a]);
     }
+    node.expanded = true;
+    return v;
 }
 
 // PUCT score for child at action `a`
@@ -148,28 +149,20 @@ run_mcts(const torch::Tensor& root_hidden,
 
     // Create and expand root
     auto root = std::make_unique<MCTSNode>(root_hidden.to(device));
-    expand_node(*root, model);
+    MinMaxStats stats;
+    float root_v = expand_node(*root, model);
+    backup({root.get()}, root_v, cfg, stats);
 
     // Add Dirichlet noise at root for exploration
     static thread_local std::mt19937 rng{std::random_device{}()};
     add_dirichlet(*root, cfg.dirichlet_alpha, cfg.dirichlet_epsilon, rng);
 
-    MinMaxStats stats;
-    // Initialise stats from root's children
-    for (int a = 0; a < NUM_ACTIONS; ++a) {
-        if (root->children[a]) {
-            stats.update(root->children[a]->reward);
-        }
-    }
-
     for (int sim = 0; sim < cfg.num_simulations; ++sim) {
         auto path = select_path(*root, stats, cfg);
         MCTSNode* leaf = path.back();
 
-        // Expand leaf via dynamics + prediction
-        expand_node(*leaf, model);
-
-        float leaf_value = leaf->value();
+        // Expand leaf via dynamics + prediction, back up its predicted value
+        float leaf_value = expand_node(*leaf, model);
         backup(path, leaf_value, cfg, stats);
     }
 

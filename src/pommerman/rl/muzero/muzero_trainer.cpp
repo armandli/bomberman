@@ -1,6 +1,7 @@
 #include "pommerman/rl/muzero/muzero_trainer.hpp"
 #include "pommerman/rl/muzero/mcts.hpp"
 #include "pommerman/rl/obs_encoder.hpp"
+#include "pommerman/rl/reward_shaper.hpp"
 #include "pommerman/constants.hpp"
 #include <algorithm>
 #include <cmath>
@@ -23,53 +24,6 @@ MuZeroTrainer::MuZeroTrainer(MuZeroModel model,
                  torch::optim::AdamOptions(cfg.lr).weight_decay(cfg.weight_decay))
 {
     model_->to(device_);
-}
-
-// ── Shaped reward ─────────────────────────────────────────────────────────────
-
-float MuZeroTrainer::compute_shaped_reward(
-        const pommerman::Observation& prev,
-        const pommerman::Observation& curr,
-        float base_reward,
-        bool done) const {
-    float r = base_reward;
-
-    if (!done) {
-        r += 0.003f; // survival
-
-        // Wood destroyed
-        int prev_wood = 0, curr_wood = 0;
-        for (auto& row : prev.board)
-            for (pommerman::Item v : row)
-                if (v == pommerman::Item::Wood) ++prev_wood;
-        for (auto& row : curr.board)
-            for (pommerman::Item v : row)
-                if (v == pommerman::Item::Wood) ++curr_wood;
-        r += 0.1f * static_cast<float>(prev_wood - curr_wood);
-
-        // Powerup
-        bool got_powerup = (curr.blast_strength > prev.blast_strength ||
-                            (!prev.can_kick && curr.can_kick));
-        if (got_powerup) r += 0.03f;
-    }
-
-    // Enemy kills: compare alive counts
-    int prev_alive = 0, curr_alive = 0;
-    auto is_agent = [](pommerman::Item v) {
-        int iv = static_cast<int>(v);
-        return iv >= static_cast<int>(pommerman::Item::Agent0) &&
-               iv <= static_cast<int>(pommerman::Item::Agent3);
-    };
-    for (auto& row : prev.board)
-        for (pommerman::Item v : row)
-            if (is_agent(v)) ++prev_alive;
-    for (auto& row : curr.board)
-        for (pommerman::Item v : row)
-            if (is_agent(v)) ++curr_alive;
-    int kills = std::max(0, prev_alive - curr_alive);
-    r += 0.3f * static_cast<float>(kills);
-
-    return r;
 }
 
 // ── self_play ─────────────────────────────────────────────────────────────────
@@ -129,8 +83,7 @@ float MuZeroTrainer::self_play(pommerman::Environment& env) {
             }
             actions[a] = static_cast<pommerman::Action>(act);
             segs[a].actions.push_back(act);
-            // root value placeholder — will be overwritten after rewards are known
-            segs[a].value_targets.push_back(root_value);
+            segs[a].root_values.push_back(root_value);
         }
 
         auto prev_obs = obs;
@@ -138,14 +91,14 @@ float MuZeroTrainer::self_play(pommerman::Environment& env) {
         done = is_done;
         obs = next_obs;
 
+        // Same shaping as PPO/DQN; includes -1 on the step an agent dies
+        auto shaped = RewardShaper::shape(prev_obs, obs, base_rewards, done);
         for (int a = 0; a < NUM_AGENTS; ++a) {
             if (!alive[a]) continue;
-            float r = compute_shaped_reward(prev_obs[a], obs[a],
-                                            static_cast<float>(base_rewards[a]),
-                                            done);
-            segs[a].rewards.push_back(r);
-            ep_rewards[a] += r;
-            if (done || base_rewards[a] < -0.5) alive[a] = false;
+            segs[a].rewards.push_back(shaped[a]);
+            ep_rewards[a] += shaped[a];
+            // An agent's segment ends on the step it dies (or at game end)
+            if (RewardShaper::agent_terminal(obs, a, done)) alive[a] = false;
         }
     }
 
@@ -167,7 +120,6 @@ float MuZeroTrainer::self_play(pommerman::Environment& env) {
 
 TrainStats MuZeroTrainer::train_step() {
     auto batch = buffer_.sample_batch(device_);
-    int B = cfg_.batch_size;
     int K = cfg_.unroll_steps;
 
     model_->train();
@@ -204,10 +156,27 @@ TrainStats MuZeroTrainer::train_step() {
         // Reward MSE
         auto r_loss = torch::mse_loss(pred_reward, reward_k);
 
-        // SimSiam consistency: compare dynamics hidden with fresh representation
-        // of the NEXT observation.  We approximate by re-using next_hidden vs
-        // the current hidden projected through SimSiam (self-consistency signal).
-        auto c_loss = model_->simsiam->consistency_loss(next_hidden, hidden.detach());
+        // EfficientZero consistency: dynamics' predicted hidden for t+k+1 vs the
+        // representation of the real observation at t+k+1 (stop-gradient target),
+        // masked where that observation does not exist (past episode end).
+        torch::Tensor c_loss;
+        {
+            auto mask = batch.next_mask.select(1, k);                 // [B]
+            torch::Tensor h_target;
+            {
+                torch::NoGradGuard ng;
+                h_target = model_->represent(batch.next_item_idx.select(1, k),
+                                             batch.next_sp_cont.select(1, k),
+                                             batch.next_ag_feat.select(1, k));
+            }
+            auto z_dyn  = model_->simsiam->project(next_hidden);
+            auto p_dyn  = model_->simsiam->predict_proj(z_dyn);
+            auto z_repr = model_->simsiam->project(h_target).detach();
+            auto cos    = torch::nn::functional::cosine_similarity(
+                p_dyn, z_repr,
+                torch::nn::functional::CosineSimilarityFuncOptions().dim(1)); // [B]
+            c_loss = -(cos * mask).sum() / mask.sum().clamp_min(1.0f);
+        }
 
         loss = loss
              + cfg_.policy_weight      * p_loss
@@ -220,8 +189,9 @@ TrainStats MuZeroTrainer::train_step() {
         total_r_loss += r_loss.item<float>();
         total_c_loss += c_loss.item<float>();
 
-        // Carry hidden forward (stop gradient on hidden for stability)
-        hidden = next_hidden.detach();
+        // Carry hidden forward, scaling its gradient by 0.5 (MuZero) so later
+        // unroll steps still train the dynamics network without exploding.
+        hidden = 0.5f * next_hidden + 0.5f * next_hidden.detach();
     }
 
     loss = loss / static_cast<float>(K);

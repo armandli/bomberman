@@ -34,6 +34,7 @@ public:
 
     GameBuffer& buffer() { return buffer_; }
     MuZeroModel& model() { return model_; }
+    torch::optim::Optimizer& optimizer() { return optimizer_; }
 
 private:
     MuZeroConfig        cfg_;
@@ -41,13 +42,6 @@ private:
     MuZeroModel         model_;
     GameBuffer          buffer_;
     torch::optim::Adam  optimizer_;
-
-    // Shaped reward helpers (survival + wood + kill + powerup)
-    float compute_shaped_reward(
-        const pommerman::Observation& prev,
-        const pommerman::Observation& curr,
-        float base_reward,
-        bool done) const;
 };
 
 } // namespace pommerman::rl::muzero

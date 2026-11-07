@@ -64,7 +64,9 @@ TEST_CASE("Agent set_agent_id FFA", "[agent]") {
 TEST_CASE("Agent set_agent_id Team", "[agent]") {
     Agent a;
     a.set_agent_id(0, GameType::Team);
-    CHECK(a.teammate_id == 1);
+    CHECK(a.teammate_id == 2);
+    CHECK(a.enemy_ids[0] == 1);
+    CHECK(a.enemy_ids[1] == 3);
 }
 
 TEST_CASE("Agent maybe_lay_bomb decrements ammo", "[agent]") {

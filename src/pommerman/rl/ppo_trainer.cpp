@@ -1,5 +1,6 @@
 #include "pommerman/rl/ppo_trainer.hpp"
 #include "pommerman/rl/obs_encoder.hpp"
+#include <algorithm>
 
 namespace pommerman::rl {
 
@@ -17,7 +18,10 @@ std::vector<PPOTrainer::Step> PPOTrainer::collect_rollout(Environment& env) {
     if (curr_done_) {
         curr_obs_  = env.reset();
         curr_done_ = false;
+        ep_len_    = 0;
     }
+    rollout_eps_    = 0;
+    rollout_ep_len_ = 0;
 
     model_->eval();
 
@@ -44,15 +48,26 @@ std::vector<PPOTrainer::Step> PPOTrainer::collect_rollout(Environment& env) {
         auto rew_t  = torch::tensor(
             std::vector<float>(shaped.begin(), shaped.end()),
             torch::kFloat).to(device_);
-        auto done_t = torch::full(
-            {NUM_AGENTS}, done ? 1.0f : 0.0f, torch::kFloat).to(device_);
+        std::array<float, NUM_AGENTS> done_v{}, valid_v{};
+        for (int i = 0; i < NUM_AGENTS; ++i) {
+            done_v[i]  = RewardShaper::agent_terminal(new_obs, i, done) ? 1.0f : 0.0f;
+            valid_v[i] = RewardShaper::agent_was_alive(curr_obs_, i)    ? 1.0f : 0.0f;
+        }
+        auto done_t  = torch::tensor(
+            std::vector<float>(done_v.begin(), done_v.end()), torch::kFloat).to(device_);
+        auto valid_t = torch::tensor(
+            std::vector<float>(valid_v.begin(), valid_v.end()), torch::kFloat).to(device_);
 
         steps.push_back({item_idx, sp_cont, ag_feat,
-                         actions, log_probs, values, rew_t, done_t});
+                         actions, log_probs, values, rew_t, done_t, valid_t});
 
         curr_obs_  = std::move(new_obs);
         curr_done_ = done;
+        ++ep_len_;
         if (done) {
+            ++rollout_eps_;
+            rollout_ep_len_ += ep_len_;
+            ep_len_    = 0;
             curr_obs_  = env.reset();
             curr_done_ = false;
         }
@@ -63,27 +78,25 @@ std::vector<PPOTrainer::Step> PPOTrainer::collect_rollout(Environment& env) {
 
 std::pair<torch::Tensor, torch::Tensor> PPOTrainer::compute_gae(
         const std::vector<Step>& steps,
-        const torch::Tensor& last_values,
-        bool last_done) {
+        const torch::Tensor& last_values) {
     int T = static_cast<int>(steps.size());
     auto advantages = torch::zeros({T, NUM_AGENTS}, torch::kFloat).to(device_);
     auto returns    = torch::zeros({T, NUM_AGENTS}, torch::kFloat).to(device_);
     auto gae        = torch::zeros({NUM_AGENTS},    torch::kFloat).to(device_);
 
-    auto next_val  = last_values;
-    auto next_done = torch::full({NUM_AGENTS}, last_done ? 1.0f : 0.0f,
-                                 torch::kFloat).to(device_);
+    auto next_val = last_values;
 
     for (int t = T - 1; t >= 0; --t) {
         const auto& s = steps[t];
-        // TD delta
-        auto delta = s.rewards + cfg_.gamma * next_val * (1.0f - next_done) - s.values;
-        gae        = delta + cfg_.gamma * cfg_.gae_lambda * gae * (1.0f - next_done);
+        // s.dones[i] == 1 means transition t ended agent i's episode, so
+        // neither V(s_{t+1}) nor later advantages may flow back into it.
+        auto not_done = 1.0f - s.dones;
+        auto delta = s.rewards + cfg_.gamma * next_val * not_done - s.values;
+        gae        = delta + cfg_.gamma * cfg_.gae_lambda * gae * not_done;
         advantages[t] = gae;
         returns[t]    = gae + s.values;
 
-        next_val  = s.values;
-        next_done = s.dones;
+        next_val = s.values;
     }
     return {advantages, returns};
 }
@@ -91,15 +104,11 @@ std::pair<torch::Tensor, torch::Tensor> PPOTrainer::compute_gae(
 PPOTrainer::Stats PPOTrainer::update(Environment& env) {
     auto steps = collect_rollout(env);
     int  T     = static_cast<int>(steps.size());
-    int  N     = T * NUM_AGENTS;
 
-    // Was the last collected step a terminal?
-    bool last_done = steps.back().dones[0].item<float>() > 0.5f;
-
+    // Bootstrap value of the observation after the last step. Agents whose
+    // last transition was terminal are masked inside compute_gae.
     torch::Tensor last_values;
-    if (last_done) {
-        last_values = torch::zeros({NUM_AGENTS}, torch::kFloat).to(device_);
-    } else {
+    {
         auto [li, ls, la] = obs_to_tensors(curr_obs_);
         torch::NoGradGuard ng;
         model_->eval();
@@ -107,10 +116,10 @@ PPOTrainer::Stats PPOTrainer::update(Environment& env) {
             li.to(device_), ls.to(device_), la.to(device_)).value;
     }
 
-    auto [advantages, returns] = compute_gae(steps, last_values, last_done);
+    auto [advantages, returns] = compute_gae(steps, last_values);
 
     // Flatten rollout to [N] tensors for minibatch training
-    std::vector<torch::Tensor> v_item, v_sp, v_ag, v_acts, v_lp, v_vals;
+    std::vector<torch::Tensor> v_item, v_sp, v_ag, v_acts, v_lp, v_vals, v_valid;
     v_item.reserve(T); v_sp.reserve(T); v_ag.reserve(T);
     v_acts.reserve(T); v_lp.reserve(T); v_vals.reserve(T);
     for (auto& s : steps) {
@@ -120,6 +129,7 @@ PPOTrainer::Stats PPOTrainer::update(Environment& env) {
         v_acts.push_back(s.actions);
         v_lp.push_back(s.log_probs);
         v_vals.push_back(s.values);
+        v_valid.push_back(s.valid);
     }
 
     auto flat_item = torch::cat(v_item, 0);  // [N, 121]
@@ -128,8 +138,21 @@ PPOTrainer::Stats PPOTrainer::update(Environment& env) {
     auto flat_acts = torch::cat(v_acts, 0);  // [N]
     auto flat_lp   = torch::cat(v_lp,   0);  // [N]
     auto flat_vals = torch::cat(v_vals, 0);  // [N]
-    auto flat_adv  = advantages.reshape({N});// [N]
-    auto flat_ret  = returns.reshape({N});   // [N]
+    auto flat_adv  = advantages.reshape({T * NUM_AGENTS});
+    auto flat_ret  = returns.reshape({T * NUM_AGENTS});
+
+    // Drop samples from agents that were already dead: their actions had no
+    // effect and their rewards are meaningless.
+    auto keep = torch::cat(v_valid, 0).nonzero().squeeze(1);
+    flat_item = flat_item.index_select(0, keep);
+    flat_sp   = flat_sp.index_select(0, keep);
+    flat_ag   = flat_ag.index_select(0, keep);
+    flat_acts = flat_acts.index_select(0, keep);
+    flat_lp   = flat_lp.index_select(0, keep);
+    flat_vals = flat_vals.index_select(0, keep);
+    flat_adv  = flat_adv.index_select(0, keep);
+    flat_ret  = flat_ret.index_select(0, keep);
+    const int N = static_cast<int>(keep.size(0));
 
     // Normalise advantages
     flat_adv = (flat_adv - flat_adv.mean()) / (flat_adv.std() + 1e-8f);
@@ -190,17 +213,22 @@ PPOTrainer::Stats PPOTrainer::update(Environment& env) {
         }
     }
 
-    float n       = static_cast<float>(updates);
-    float mean_rew = 0.0f;
-    for (auto& s : steps)
-        mean_rew += s.rewards.mean().item<float>();
-    mean_rew /= static_cast<float>(T);
+    float n        = static_cast<float>(std::max(updates, 1));
+    float rew_sum  = 0.0f, valid_sum = 0.0f;
+    for (auto& s : steps) {
+        rew_sum   += (s.rewards * s.valid).sum().item<float>();
+        valid_sum += s.valid.sum().item<float>();
+    }
+    float mean_rew = valid_sum > 0.0f ? rew_sum / valid_sum : 0.0f;
 
     float var_ret  = torch::var(flat_ret).item<float>();
     float ev       = var_ret < 1e-8f ? 0.0f :
                      1.0f - torch::var(flat_ret - flat_vals).item<float>() / var_ret;
 
-    return {total_pl / n, total_vl / n, total_ent / n, mean_rew, ev};
+    float mean_len = rollout_eps_ > 0
+        ? static_cast<float>(rollout_ep_len_) / static_cast<float>(rollout_eps_) : 0.0f;
+    return {total_pl / n, total_vl / n, total_ent / n, mean_rew, ev,
+            rollout_eps_, mean_len};
 }
 
 } // namespace pommerman::rl

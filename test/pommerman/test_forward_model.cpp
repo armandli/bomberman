@@ -240,3 +240,106 @@ TEST_CASE("ForwardModel::get_rewards: winner gets +1", "[forward_model]") {
     CHECK(rewards[2] == -1.0);
     CHECK(rewards[3] == -1.0);
 }
+
+// ── Regression tests: collisions, explosions, team rewards ───────────────────
+
+namespace {
+struct Scene {
+    ForwardModel       fm;
+    Board              static_b = empty_board();
+    Board              board{};
+    std::map<int,Item> items;
+    std::vector<Agent> agents = four_agents();
+    std::vector<Bomb>  bombs;
+    std::vector<Flame> flames;
+
+    Scene() { agents[0].position = {5, 5}; } // keep agent 0 out of the way
+
+    void step(std::array<Action, NUM_AGENTS> acts = {Action::Stop, Action::Stop,
+                                                     Action::Stop, Action::Stop}) {
+        rebuild_board(board, static_b, agents, bombs, flames);
+        fm.step(acts, board, agents, bombs, flames, static_b, items);
+    }
+    bool has_flame(Position p) const {
+        for (auto& f : flames) if (f.position == p) return true;
+        return false;
+    }
+};
+} // namespace
+
+TEST_CASE("Chain explosion is blocked by rigid walls", "[forward_model]") {
+    Scene s;
+    // (2,2) is a rigid pillar between the two bombs
+    REQUIRE(s.static_b[2][2] == Item::Rigid);
+    s.bombs.push_back(Bomb{1, {1, 2}, 1, 2, std::nullopt});
+    s.bombs.push_back(Bomb{1, {3, 2}, 9, 2, std::nullopt});
+    s.step();
+    REQUIRE(s.bombs.size() == 1);
+    CHECK(s.bombs[0].position == Position{3, 2});
+}
+
+TEST_CASE("Two blasts in one tick do not pass through the same wood", "[forward_model]") {
+    Scene s;
+    s.static_b[1][4] = Item::Wood;
+    s.bombs.push_back(Bomb{1, {1, 2}, 1, 3, std::nullopt});
+    s.bombs.push_back(Bomb{1, {1, 3}, 1, 3, std::nullopt});
+    s.step();
+    CHECK(s.static_b[1][4] == Item::Passage); // wood destroyed
+    CHECK(s.has_flame({1, 4}));
+    CHECK_FALSE(s.has_flame({1, 5}));         // blast stopped at the wood
+}
+
+TEST_CASE("Moving bomb stops when it runs into an agent", "[forward_model]") {
+    Scene s;
+    s.agents[0].position = {1, 4};
+    s.bombs.push_back(Bomb{1, {1, 3}, 9, 2, Direction::Right});
+    s.step();
+    REQUIRE(s.bombs.size() == 1);
+    CHECK(s.bombs[0].position == Position{1, 3});
+    CHECK_FALSE(s.bombs[0].is_moving());
+    CHECK(s.agents[0].position == Position{1, 4});
+}
+
+TEST_CASE("Agent cannot walk into a cell a bomb is moving into", "[forward_model]") {
+    Scene s;
+    s.agents[0].position = {1, 5};
+    s.bombs.push_back(Bomb{1, {1, 3}, 9, 2, Direction::Right});
+    s.step({Action::Left, Action::Stop, Action::Stop, Action::Stop}); // both target (1,4)
+    CHECK(s.agents[0].position == Position{1, 5});
+    REQUIRE(s.bombs.size() == 1);
+    CHECK(s.bombs[0].position == Position{1, 3});
+}
+
+TEST_CASE("Moving bomb entering a flame explodes", "[forward_model]") {
+    Scene s;
+    s.flames.push_back(Flame{{1, 4}, FLAME_LIFE});
+    s.bombs.push_back(Bomb{1, {1, 3}, 9, 1, Direction::Right});
+    s.step();
+    CHECK(s.bombs.empty());
+    CHECK(s.agents[1].ammo == 2); // ammo returned to owner
+}
+
+TEST_CASE("ForwardModel::get_rewards: team win rewards both teammates", "[forward_model]") {
+    ForwardModel fm;
+    auto agents = four_agents(GameType::Team);
+    agents[1].die(); agents[3].die(); agents[2].die(); // team 0&2 wins with agent 0 alive
+    REQUIRE(fm.is_done(agents, 10, GameType::Team));
+    auto rewards = fm.get_rewards(agents, GameType::Team, true, 10);
+    CHECK(rewards[0] ==  1.0);
+    CHECK(rewards[2] ==  1.0);
+    CHECK(rewards[1] == -1.0);
+    CHECK(rewards[3] == -1.0);
+    auto info = fm.get_info(agents, GameType::Team, 10);
+    CHECK(info.result == Result::Win);
+    CHECK(info.winners == std::vector<int>{0, 2});
+}
+
+TEST_CASE("ForwardModel::get_rewards: timeout penalises dead agents fully", "[forward_model]") {
+    ForwardModel fm;
+    auto agents = four_agents();
+    agents[3].die();
+    auto rewards = fm.get_rewards(agents, GameType::FFA, true, MAX_STEPS);
+    CHECK(rewards[0] == -0.5);
+    CHECK(rewards[3] == -1.0);
+    CHECK(fm.get_info(agents, GameType::FFA, MAX_STEPS).result == Result::Tie);
+}

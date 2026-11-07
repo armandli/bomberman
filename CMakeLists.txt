@@ -16,9 +16,15 @@ endif()
 set(CMAKE_CXX_FLAGS_DEBUG   "-g -O0 -fsanitize=address,undefined")
 set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG")
 
-# libtorch
-set(TORCH_PATH "/home/armandli/alphago_zero/libtorch"
+# libtorch (CUDA build: its CMake config calls enable_language(CUDA), so nvcc
+# must be locatable even though this project has no .cu sources)
+set(TORCH_PATH "$ENV{HOME}/.local/libtorch"
     CACHE PATH "Path to libtorch installation")
+if(NOT DEFINED CMAKE_CUDA_COMPILER AND NOT DEFINED ENV{CUDACXX}
+   AND EXISTS "/usr/local/cuda/bin/nvcc")
+  set(CMAKE_CUDA_COMPILER "/usr/local/cuda/bin/nvcc" CACHE FILEPATH "CUDA compiler")
+endif()
+set(TORCH_CUDA_ARCH_LIST "12.0" CACHE STRING "CUDA arch list for libtorch")
 find_package(Torch REQUIRED PATHS ${TORCH_PATH} NO_DEFAULT_PATH)
 
 include(FetchContent)
