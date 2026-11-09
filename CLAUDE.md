@@ -5,6 +5,7 @@ C++26 Pommerman environment + libtorch self-play trainers (PPO, DQN, MuZero). Se
 ## Build & test
 - `scripts/rl.py build` (uses `build/`, g++-14, libtorch at `~/.local/libtorch`, nvcc at `/usr/local/cuda/bin`).
 - `build/test_pommerman` must stay green; engine behaviour changes need a regression test in `test/pommerman/`.
+- `build/test_rl` covers RL components (needs libtorch) and must also stay green.
 
 ## Driving training runs
 Use `scripts/rl.py` for everything; never launch trainer binaries by hand for real runs.

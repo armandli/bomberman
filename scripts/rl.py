@@ -244,7 +244,7 @@ def ensure_build(targets: list[str]) -> None:
 
 
 def cmd_build(a) -> None:
-    ensure_build(list(ALGOS.values()) + ["test_pommerman"])
+    ensure_build(list(ALGOS.values()) + ["test_pommerman", "test_rl"])
     print("Build OK")
 
 

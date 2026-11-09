@@ -6,7 +6,7 @@ trainers built on libtorch:
 | Algo     | Binary         | Model                                                     |
 |----------|----------------|-----------------------------------------------------------|
 | `ppo`    | `train_ppo`    | Transformer actor-critic, clipped PPO + GAE               |
-| `dqn`    | `train_dqn`    | Transformer dueling double DQN, uniform replay            |
+| `dqn`    | `train_dqn`    | Transformer Rainbow DQN (double, dueling, n-step, PER, C51, noisy) |
 | `muzero` | `train_muzero` | MuZero / EfficientZero (learned dynamics, PUCT MCTS, SimSiam consistency) |
 
 All four seats are played by the same network (self-play, FFA).
@@ -45,7 +45,7 @@ scripts/rl.py resume ppo-2026 -- --lr 1e-4 --entropy-coef 0.02   # continue with
 
 `resume` merges the overrides into the run's previous args, restarts from the
 last checkpoint (model **and** optimizer state; `--lr` is re-applied), and
-continues the iteration count (`--start-iter`), so DQN's epsilon schedule and
+continues the iteration count (`--start-iter`), so DQN's epsilon and beta schedules and
 the metrics timeline carry on. To extend a finished run, pass a larger budget
 (`--num-updates` / `--total-steps` / `--total-games`).
 
@@ -80,6 +80,18 @@ it in the background gives a notification when anything needs attention.
 
 Each run keeps a cursor (`.watch_state`), so repeated `watch` calls only report
 new events (`--reset` re-scans everything).
+
+### DQN components
+
+`train_dqn` runs the full Rainbow agent by default. For ablation runs, use
+`--n-step 1`, `--no-per`, `--no-noisy` (switches to epsilon-greedy) or
+`--no-distributional` (scalar Q-values and smooth L1 loss). The last two change
+the network, so they cannot be changed on `resume`.
+
+`--v-min`/`--v-max` (default -2 to 4) must fit the shaped returns. Watch
+`edge_mass` in the train records, the share of target probability on the
+outermost atoms: if it stays high, the support is too narrow. Noise is off in
+evaluation, so evals use the mean weights. `loss` is KL in distributional mode.
 
 ### Metrics records (`metrics.jsonl`)
 
