@@ -1,5 +1,6 @@
 #pragma once
 #include <array>
+#include <limits>
 #include <memory>
 #include <vector>
 #include <torch/torch.h>

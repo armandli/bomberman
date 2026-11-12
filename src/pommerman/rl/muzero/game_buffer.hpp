@@ -19,11 +19,14 @@ struct GameSegment {
     std::vector<int>   actions;
     std::vector<float> rewards;
     std::vector<torch::Tensor> mcts_policies;  // each [NUM_ACTIONS] float
-    std::vector<float> value_targets;           // n-step bootstrap
+    std::vector<float> root_values;             // MCTS root value at each step
+    std::vector<float> value_targets;           // n-step bootstrap (computed)
 
     int length() const { return static_cast<int>(actions.size()); }
 
-    // Compute n-step value targets in-place (call once after episode ends)
+    // Compute n-step value targets in-place (call once after episode ends):
+    //   z_t = sum_{k<n} γ^k r_{t+k} + γ^n v_root(t+n)   (bootstrap only if t+n < T;
+    //   the segment ends at the agent's death or game end, which are terminal)
     void compute_value_targets(float discount, int td_steps);
 };
 
@@ -37,8 +40,14 @@ struct TrainingBatch {
     // Unrolled K steps
     torch::Tensor actions;        // [B, K] int64
     torch::Tensor rewards;        // [B, K]
-    torch::Tensor mcts_policies;  // [B, K, NUM_ACTIONS]
-    torch::Tensor value_targets;  // [B, K]
+    torch::Tensor mcts_policies;  // [B, K, NUM_ACTIONS] (zeros past episode end)
+    torch::Tensor value_targets;  // [B, K]              (zeros past episode end)
+
+    // Observation reached after unroll step k (t+k+1), for the consistency loss
+    torch::Tensor next_item_idx;  // [B, K, 121] int64
+    torch::Tensor next_sp_cont;   // [B, K, 121, 8]
+    torch::Tensor next_ag_feat;   // [B, K, 13]
+    torch::Tensor next_mask;      // [B, K] 1 if obs t+k+1 exists
 };
 
 // ── GameBuffer ────────────────────────────────────────────────────────────────

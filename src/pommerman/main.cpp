@@ -1,6 +1,7 @@
 #include <atomic>
 #include <chrono>
 #include <memory>
+#include <mutex>
 #include <thread>
 #include <vector>
 
@@ -29,8 +30,13 @@ int main() {
 
     auto screen = ScreenInteractive::TerminalOutput();
     std::atomic<bool> quit{false};
+    // env is stepped on the game thread and rendered on the UI thread.
+    std::mutex env_mutex;
 
-    auto component = Renderer([&] { return ui::render_game(env); });
+    auto component = Renderer([&] {
+        std::lock_guard lock(env_mutex);
+        return ui::render_game(env);
+    });
     component |= CatchEvent([&](Event event) {
         if (event == Event::Character('q') || event == Event::Escape) {
             quit = true;
@@ -42,14 +48,21 @@ int main() {
 
     // Game loop runs in a background thread at ~4 steps/second.
     std::thread game_thread([&] {
-        while (!quit && !env.is_done()) {
+        bool done = false;
+        while (!quit && !done) {
             std::vector<Action> actions;
             actions.reserve(NUM_AGENTS);
             for (int i = 0; i < NUM_AGENTS; ++i)
                 actions.push_back(agents[i]->act(obs[i]));
 
-            auto [new_obs, rewards, done, info] = env.step(actions);
-            obs = std::move(new_obs);
+            std::vector<double> rewards;
+            {
+                std::lock_guard lock(env_mutex);
+                auto [new_obs, step_rewards, step_done, info] = env.step(actions);
+                obs     = std::move(new_obs);
+                rewards = std::move(step_rewards);
+                done    = step_done;
+            }
 
             if (done) {
                 for (int i = 0; i < NUM_AGENTS; ++i)

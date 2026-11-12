@@ -15,5 +15,4 @@ target_link_libraries(pommerman_muzero_lib
             ${TORCH_LIBRARIES}
 )
 
-target_compile_options(pommerman_muzero_lib PRIVATE ${TORCH_CXX_FLAGS})
-set_property(TARGET pommerman_muzero_lib PROPERTY CXX_STANDARD 20)
+target_compile_options(pommerman_muzero_lib PRIVATE ${TORCH_CXX_FLAGS} -Wall -Wextra)

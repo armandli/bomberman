@@ -33,7 +33,7 @@ void Agent::set_agent_id(int id, GameType gtype) noexcept {
         }
     } else {
         // Team / TeamRadio: agents 0&2 vs 1&3
-        teammate_id = (id % 2 == 0) ? id + 1 : id - 1;
+        teammate_id = (id + 2) % NUM_AGENTS;
         int ei = 0;
         for (int i = 0; i < NUM_AGENTS && ei < 3; ++i) {
             if (i != id && i != teammate_id) enemy_ids[ei++] = i;
